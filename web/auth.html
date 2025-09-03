@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="/assets/app.css">
+  <title>Giriş/Kayıt • Ecom GO</title>
+</head>
+<body>
+  <nav class="nav">
+    <a href="/">Ürünler</a>
+    <a href="/cart">Sepet</a>
+    <span class="right muted">Doğrulama maili için gelen kutunu kontrol et</span>
+  </nav>
+
+  <main class="container two">
+    <section class="card">
+      <h2>Kayıt</h2>
+      <input id="regEmail" placeholder="email" type="email">
+      <input id="regPass"  placeholder="şifre" type="password">
+      <button id="btnRegister">Kayıt Ol</button>
+    </section>
+
+    <section class="card">
+      <h2>Giriş</h2>
+      <input id="logEmail" placeholder="email" type="email">
+      <input id="logPass"  placeholder="şifre" type="password">
+      <button id="btnLogin">Giriş Yap</button>
+      <button id="btnLogout">Çıkış</button>
+      <div id="who" class="muted"></div>
+    </section>
+  </main>
+
+  <div class="container"><div id="msg"></div></div>
+
+  <script src="/assets/auth.js"></script>
+</body>
+</html>
