@@ -1,0 +1,40 @@
+# Binaries ve derlenmiş dosyalar
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary'leri
+*.test
+
+# Go derleme çıktıları
+*.out
+
+# mod cache
+vendor/
+
+# Geçici dosyalar
+*.log
+*.tmp
+
+# Ortam değişkenleri
+.env
+.env.*
+
+# OS / IDE özel dosyalar
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# JetBrains IDE'leri (GoLand, IntelliJ)
+.idea/
+
+# Windows
+desktop.ini
+
+# Node.js (eğer frontend de varsa)
+node_modules/
+dist/
