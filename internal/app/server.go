@@ -87,16 +87,22 @@ func NewServer(cfg Config) (*gin.Engine, func(), error) {
 
 	// --- Auth ---
 	r.POST("/api/auth/register", func(c *gin.Context) {
-		var req struct{ Email, Password string }
-		if err := c.BindJSON(&req); err != nil || req.Email == "" || req.Password == "" {
-			c.JSON(400, gin.H{"error": "bad json"})
-			return
-		}
-		if err := auth.Register(req.Email, req.Password); err != nil {
-			c.JSON(400, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(200, gin.H{"ok": true})
+		var req struct {
+        		Email    string `json:"email"`
+        		Password string `json:"password"`
+    		}
+  	  	if err := c.BindJSON(&req); err != nil || req.Email == "" || req.Password == "" {
+        	c.JSON(400, gin.H{"error": "bad json"})
+        		return
+    		}
+
+    		if err := auth.Register(req.Email, req.Password); err != nil {
+        		c.JSON(400, gin.H{"error": err.Error()})
+        		return
+    		}
+
+    		// E-posta doğrulama linki gönderildi
+    		c.JSON(200, gin.H{"ok": true})
 	})
 
 	r.GET("/api/auth/verify", func(c *gin.Context) {
@@ -109,7 +115,8 @@ func NewServer(cfg Config) (*gin.Engine, func(), error) {
 			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(200, gin.H{"ok": true})
+ 		// Doğrulama başarılı → anasayfaya / ürünler sayfasına
+    		c.Redirect(http.StatusFound, "/")
 	})
 
 	r.POST("/api/auth/login", func(c *gin.Context) {

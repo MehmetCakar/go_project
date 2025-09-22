@@ -10,12 +10,14 @@ type Product struct {
   UpdatedAt  time.Time
 }
 type User struct {
-	ID       uint   `gorm:"primaryKey"`
-	Email    string `gorm:"uniqueIndex;size:255"`
-	Password string // bcrypt hash
-	Verified bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID        uint      `gorm:"primaryKey"`
+	Email     string    `gorm:"uniqueIndex"`
+	Password  string
+	Verified  bool
+	// ---
+	VerifyCode    string     // 6 haneli kod (dilersen hash’leyebilirsin)
+	VerifyExpires *time.Time // son kullanma (örn. 15 dk)
+	// timestamps …
 }
 type CartItem struct {
 	ID        uint `gorm:"primaryKey"`

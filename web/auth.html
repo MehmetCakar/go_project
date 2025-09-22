@@ -20,6 +20,13 @@
       <input id="regPass"  placeholder="şifre" type="password">
       <button id="btnRegister">Kayıt Ol</button>
     </section>
+    <section>
+     <h2>Kod ile Doğrula</h2>
+     <input id="codeEmail" placeholder="email" type="email">
+     <input id="codeInput"  placeholder="6 haneli kod" type="text" maxlength="6">
+     <button onclick="verifyCode()">Kodu Doğrula</button>
+     <div class="muted">Kod gelmediyse önce kayıt ol / giriş yap butonundan tetikleyin.</div>
+   </section>
 
     <section class="card">
       <h2>Giriş</h2>

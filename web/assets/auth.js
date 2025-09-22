@@ -22,6 +22,26 @@ function setMsg(s, ok = true) {
   }
 }
 
+window.verifyCode = async function(){
+  const email = document.getElementById('codeEmail').value.trim();
+  const code  = document.getElementById('codeInput').value.trim();
+  try{
+    const r = await fetch('/api/auth/verify-code',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body: JSON.stringify({email, code})
+    });
+    const data = await r.json();
+    if(!r.ok) throw new Error(data?.error || r.statusText);
+    // Başarılı: ana sayfaya (ürünler) yönlendir
+    location.href = '/';
+  }catch(e){
+    setMsg('Doğrulama hatası: '+e.message, false);
+  }
+}
+
+
 // Kayıt
 async function register() {
   const email = document.getElementById("regEmail")?.value.trim();
