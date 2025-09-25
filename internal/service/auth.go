@@ -1,11 +1,14 @@
 package service
 
 import (
-	"errors"
+	"strings"
+	crand "crypto/rand"
 	"fmt"
-	"net/url"
+	"math/big"
 	"os"
 	"time"
+	"errors"
+	"log"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -14,11 +17,22 @@ import (
 	"example.com/ecom-go/internal/model"
 )
 
+// Not: ErrExistsVerified ve ErrExistsUnverified ayrı errors.go dosyasında varsa
+// buradakilerle ÇAKIŞMA olmasın. Eğer yoksa buradakileri kullan.
+//var (
+/*	ErrExistsVerified   = errors.New("exists-verified")
+	ErrExistsUnverified = errors.New("exists-unverified")
+)*/
+
 type AuthService interface {
 	Register(email, password string) error
+	VerifyCode(email, code string) error
+	ResendCode(email string) error
+	Login(email, password string) (string, error)  // returns JWT
+	ParseToken(token string) (uint, error)         // returns userID
+
+	// Eski link tabanlı doğrulama için (kullanmayacağız ama interface kırılmasın)
 	VerifyEmail(token string) error
-	Login(email, password string) (string, error) // returns JWT
-	ParseToken(token string) (uint, error)        // returns userID
 }
 
 type authService struct {
@@ -29,8 +43,11 @@ func NewAuthService(db *gorm.DB) AuthService { return &authService{db: db} }
 
 func jwtSecret() []byte { return []byte(os.Getenv("JWT_SECRET")) }
 
-// Kamuya açık base URL (Nginx ile yayınlanan host)
+// İhtiyaç halinde public base döndürür (şu an kod akışında kullanılmıyor)
 func publicBase() string {
+	if v := os.Getenv("APP_BASE_URL"); v != "" {
+		return v
+	}
 	if v := os.Getenv("PUBLIC_BASE_URL"); v != "" {
 		return v
 	}
@@ -38,30 +55,80 @@ func publicBase() string {
 }
 
 // ---------------------------------------------------
-// Register
+// Yardımcılar
 // ---------------------------------------------------
 
+// 6 haneli doğrulama kodu (000000–999999), kriptografik rastgele
+func gen6() (string, error) {
+	max := big.NewInt(1000000) // 0..999999
+	n, err := crand.Int(crand.Reader, max)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()), nil
+}
+
+// Kullanıcıya yeni kod üretir, DB'ye yazar ve e-posta gönderir.
+func (a *authService) generateAndSendCode(u *model.User) error {
+	code, err := gen6()
+	if err != nil {
+		return err
+	}
+	expires := time.Now().Add(15 * time.Minute)
+
+	// DB'de kodu/süreyi güncelle
+	if err := a.db.Model(&model.User{}).
+		Where("id = ?", u.ID).
+		Updates(map[string]interface{}{
+			"verify_code":    code,
+			"verify_expires": expires,
+		}).Error; err != nil {
+		return err
+	}
+
+	// Spam-dostu sade içerik
+	subject := "E-posta Doğrulama Kodun"
+	html := fmt.Sprintf(`
+<!doctype html>
+<html><body style="font-family:Arial,sans-serif">
+  <h2>Doğrulama Kodun</h2>
+  <p>Merhaba,</p>
+  <p>Aşağıdaki 6 haneli kodu 15 dakika içinde sitedeki doğrulama kutusuna gir:</p>
+  <div style="font-size:28px;font-weight:700;letter-spacing:4px;margin:16px 0">%s</div>
+  <p>Bu işlemi siz başlatmadıysanız, e-postayı yok sayabilirsiniz.</p>
+  <hr>
+  <p style="color:#888;font-size:12px">Bu e-posta <a href="https://cakarokko.com">cakarokko.com</a> tarafından gönderildi.</p>
+</body></html>`, code)
+
+	if err := NewEmailService().Send(u.Email, subject, html); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ---------------------------------------------------
+// Register
+// ---------------------------------------------------
 func (a *authService) Register(email, password string) error {
-	// Mail zaten var mı?
 	var existed model.User
 	err := a.db.Where("email = ?", email).First(&existed).Error
+
 	if err == nil {
-		// Kullanıcı zaten var
+		// kullanıcı var
 		if !existed.Verified {
-			// Doğrulanmamış ise tekrar doğrulama maili gönder
-			if err := a.sendVerifyMail(existed.ID, existed.Email); err != nil {
-				return err
+			// yeni kod üret ve gönder; hata loglanır, 200 döneriz
+			if err := a.generateAndSendCode(&existed); err != nil {
+				log.Printf("Kod maili gönderilemedi (yeniden): %v", err)
 			}
-			// Burada özel bir hata döndürebilirsiniz; şimdilik bilgi amaçlı error
-			return errors.New("email already exists but not verified — verification re-sent")
+			return ErrExistsUnverified
 		}
-		return errors.New("email already exists")
+		return ErrExistsVerified
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
 
-	// Yeni kullanıcı
+	// yeni kullanıcı oluştur
 	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	u := model.User{
 		Email:    email,
@@ -72,31 +139,67 @@ func (a *authService) Register(email, password string) error {
 		return err
 	}
 
-	// Doğrulama maili gönder
-	return a.sendVerifyMail(u.ID, u.Email)
+	// ilk doğrulama kodunu gönder (hata olursa logla ve yut)
+	if err := a.generateAndSendCode(&u); err != nil {
+		log.Printf("Kod maili gönderilemedi: %v", err)
+	}
+	return nil
 }
 
-func (a *authService) sendVerifyMail(userID uint, to string) error {
-	// 24 saatlik verify token
-	t := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub": userID,
-		"typ": "verify",
-		"exp": time.Now().Add(24 * time.Hour).Unix(),
-	})
-	token, err := t.SignedString(jwtSecret())
-	if err != nil {
+// ---------------------------------------------------
+// VerifyCode
+// ---------------------------------------------------
+func (a *authService) VerifyCode(email, code string) error {
+	code = strings.TrimSpace(code)
+
+	var u model.User
+	if err := a.db.Where("email = ?", email).First(&u).Error; err != nil {
 		return err
 	}
-	link := fmt.Sprintf("%s/api/auth/verify?token=%s", publicBase(), url.QueryEscape(token))
-	body := "Merhaba,\n\nHesabını doğrulamak için aşağıdaki bağlantıya tıkla:\n" + link + "\n\nTeşekkürler."
+	if u.Verified {
+		return nil // zaten doğrulanmış
+	}
+	if u.VerifyCode == "" || u.VerifyExpires == nil {
+		return errors.New("no active code")
+	}
+	if time.Now().After(*u.VerifyExpires) {
+		return errors.New("code expired")
+	}
+	if code != u.VerifyCode {
+		return errors.New("invalid code")
+	}
 
-	return NewEmailService().Send(to, "Hesabını Doğrula", body)
+	// doğrulandı → kodları temizle
+	if err := a.db.Model(&model.User{}).
+		Where("id = ?", u.ID).
+		Updates(map[string]any{
+			"verified":       true,
+			"verify_code":    nil,
+			"verify_expires": nil,
+		}).Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 // ---------------------------------------------------
-// VerifyEmail
+// ResendCode
 // ---------------------------------------------------
+func (a *authService) ResendCode(email string) error {
+	var u model.User
+	if err := a.db.Where("email = ?", email).First(&u).Error; err != nil {
+		// enumeration engelle: kullanıcı yoksa sessizce dön
+		return nil
+	}
+	if u.Verified {
+		return nil
+	}
+	return a.generateAndSendCode(&u)
+}
 
+// ---------------------------------------------------
+// (Legacy) VerifyEmail by JWT — artık kullanılmıyor ama interface dursun
+// ---------------------------------------------------
 func (a *authService) VerifyEmail(token string) error {
 	claims := jwt.MapClaims{}
 	_, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
@@ -120,7 +223,6 @@ func (a *authService) VerifyEmail(token string) error {
 // ---------------------------------------------------
 // Login
 // ---------------------------------------------------
-
 func (a *authService) Login(email, password string) (string, error) {
 	var u model.User
 	if err := a.db.Where("email = ?", email).First(&u).Error; err != nil {
@@ -144,7 +246,6 @@ func (a *authService) Login(email, password string) (string, error) {
 // ---------------------------------------------------
 // ParseToken
 // ---------------------------------------------------
-
 func (a *authService) ParseToken(token string) (uint, error) {
 	claims := jwt.MapClaims{}
 	_, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {

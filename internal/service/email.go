@@ -3,51 +3,108 @@ package service
 import (
 	"crypto/tls"
 	"fmt"
-	"net/smtp"
 	"os"
+	"strconv"
 	"strings"
+//	"time"
+
+	gomail "gopkg.in/gomail.v2"
 )
 
 type EmailService interface {
-	Send(to, subject, body string) error
+	Send(to, subject, htmlBody string) error
 }
 
-type smtpEmail struct{}
+type emailService struct {
+	host     string
+	port     int
+	username string
+	password string
+	from     string
+	fromName string
+}
 
-func NewEmailService() EmailService { return &smtpEmail{} }
+func NewEmailService() EmailService {
+	host := strings.TrimSpace(os.Getenv("SMTP_HOST"))
+	portStr := strings.TrimSpace(os.Getenv("SMTP_PORT"))
+	user := strings.TrimSpace(os.Getenv("SMTP_USERNAME"))
+	pass := strings.TrimSpace(os.Getenv("SMTP_PASSWORD"))
+	from := strings.TrimSpace(os.Getenv("SMTP_FROM"))
+	fromName := strings.TrimSpace(os.Getenv("SMTP_FROM_NAME")) // opsiyonel
 
-func (s *smtpEmail) Send(to, subject, body string) error {
-	host := os.Getenv("SMTP_HOST")           // smtp-relay.brevo.com
-	port := os.Getenv("SMTP_PORT")           // 587
-	user := os.Getenv("SMTP_USER")           // 9748...@smtp-brevo.com
-	pass := os.Getenv("SMTP_PASS")           // ********
-	from := os.Getenv("SMTP_FROM")           // Ecom GO <no-reply@cakarokko.com>
-
-	addr := host + ":" + port
-
-	// RFC 5322 compliant headers
-	headers := map[string]string{
-		"From":         from,
-		"To":           to,
-		"Subject":      subject,
-		"MIME-Version": "1.0",
-		"Content-Type": "text/plain; charset=UTF-8",
+	port := 587
+	if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+		port = p
 	}
-	var sb strings.Builder
-	for k, v := range headers {
-		sb.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+
+	return &emailService{
+		host:     host,
+		port:     port,
+		username: user,
+		password: pass,
+		from:     from,
+		fromName: fromName,
 	}
-	sb.WriteString("\r\n")
-	sb.WriteString(body)
-	msg := []byte(sb.String())
+}
 
-	// AUTH
-	auth := smtp.PlainAuth("", user, pass, host)
+func (e *emailService) Send(to, subject, verifyLink string) error {
+    m := gomail.NewMessage()
+    e.fromName = os.Getenv("SMTP_FROM_NAME")
 
-	// STARTTLS (587)
-	tlsconfig := &tls.Config{ServerName: host}
-	// smtp.SendMail kendi STARTTLS’ı çağırır; ama CA/tls sorunlarında bu fallback işe yarar.
-	_ = tlsconfig // sadece örnek; genelde SendMail yeter
+    // From: (fromName varsa kullan; yoksa sade e.from)
+    if e.fromName != "" {
+        m.SetHeader("From", fmt.Sprintf("%s <%s>", e.fromName, e.from))
+    } else {
+        m.SetHeader("From", "Cakarokko <no-reply@cakarokko.com>")
+    }
 
-	return smtp.SendMail(addr, auth, from, []string{to}, msg)
+    m.SetHeader("To", to)
+    m.SetHeader("Subject", subject)
+
+    // ✅ Spam dostu, profesyonel HTML gövde
+    htmlBody := fmt.Sprintf(`
+    <html>
+      <body style="font-family: Arial, sans-serif; color: #333; background-color:#f9f9f9; padding: 20px;">
+        <h2 style="color:#4CAF50;">Welcome to Cakarokko 🎉</h2>
+        <p>Thank you for registering with <strong>Cakarokko</strong>!</p>
+        <p>To complete your registration, please verify your email by clicking the button below:</p>
+
+        <p style="margin: 30px 0;">
+          <a href="%s" style="display:inline-block;background:#4CAF50;color:white;padding:14px 24px;text-decoration:none;border-radius:5px;">
+            ✅ Verify My Email
+          </a>
+        </p>
+
+        <p>If you didn’t request this email, you can safely ignore it.</p>
+        <hr>
+        <p style="font-size:12px; color:#888;">
+          📩 This email was sent automatically by Cakarokko. Please do not reply.<br>
+          🌐 Visit us: <a href="https://cakarokko.com">https://cakarokko.com</a>
+        </p>
+      </body>
+    </html>
+    `, verifyLink)
+
+    // HTML gövde
+    m.SetBody("text/html", htmlBody)
+
+// Plain-text alternatif: link YOK
+//	plain := "Merhaba!\n\nAşağıdaki 6 haneli kodu 15 dakika içinde sitedeki doğrulama kutusuna gir:\n\n" +
+  //      	 "KOD: " + code + "\n\n" +
+    //  	 	  "Bu işlemi sen başlatmadıysan bu e-postayı yok sayabilirsin."
+//	m.AddAlternative("text/plain", plain)
+
+    // ✅ Plain text alternatif (Gmail ve Outlook spam skoru için önemli!)
+//    m.AddAlternative("text/plain", "Merhaba! E-postanı doğrulamak için bu bağlantıya tıkla: "+verifyLink)
+
+    d := gomail.NewDialer(e.host, e.port, e.username, e.password)
+
+    // STARTTLS sonrası SNI/hostname doğrulaması için ServerName’i zorla
+    d.TLSConfig = &tls.Config{
+        ServerName:         e.host,
+        MinVersion:         tls.VersionTLS12,
+        InsecureSkipVerify: false,
+    }
+
+    return d.DialAndSend(m)
 }

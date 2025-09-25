@@ -4,11 +4,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
-
+	"log"
+	"errors"
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-
 	"example.com/ecom-go/internal/model"
 	"example.com/ecom-go/internal/service"
 )
@@ -86,59 +86,128 @@ func NewServer(cfg Config) (*gin.Engine, func(), error) {
 	})
 
 	// --- Auth ---
+
 	r.POST("/api/auth/register", func(c *gin.Context) {
-		var req struct {
+		        var req struct {
         		Email    string `json:"email"`
         		Password string `json:"password"`
     		}
-  	  	if err := c.BindJSON(&req); err != nil || req.Email == "" || req.Password == "" {
-        	c.JSON(400, gin.H{"error": "bad json"})
+    		if err := c.ShouldBindJSON(&req); err != nil {
+    		    	c.JSON(400, gin.H{"error": "invalid payload"})
         		return
     		}
 
-    		if err := auth.Register(req.Email, req.Password); err != nil {
-        		c.JSON(400, gin.H{"error": err.Error()})
-        		return
-    		}
+    		// 🔐 Kullanıcı kaydı dene
+		err := auth.Register(req.Email, req.Password)
 
-    		// E-posta doğrulama linki gönderildi
-    		c.JSON(200, gin.H{"ok": true})
-	})
+		switch {
+		case err == nil || errors.Is(err, service.ErrExistsUnverified):
+    			c.JSON(http.StatusOK, gin.H{"ok": true})
+    			return
+		case errors.Is(err, service.ErrExistsVerified):
+    			c.JSON(http.StatusConflict, gin.H{"error": "email already exists"})
+  			  return
+		default:
+    			log.Printf("register unexpected: %v", err)
+    			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+    			return
+		}
 
-	r.GET("/api/auth/verify", func(c *gin.Context) {
-		t := c.Query("token")
-		if t == "" {
-			c.JSON(400, gin.H{"error": "missing token"})
-			return
-		}
-		if err := auth.VerifyEmail(t); err != nil {
-			c.JSON(400, gin.H{"error": err.Error()})
-			return
-		}
- 		// Doğrulama başarılı → anasayfaya / ürünler sayfasına
-    		c.Redirect(http.StatusFound, "/")
 	})
 
 	r.POST("/api/auth/login", func(c *gin.Context) {
-		var req struct{ Email, Password string }
-		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, gin.H{"error": "bad json"})
+		type reqBody struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		var req reqBody
+		if err := c.BindJSON(&req); err != nil || req.Email == "" || req.Password == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 			return
 		}
+
 		tok, err := auth.Login(req.Email, req.Password)
 		if err != nil {
-			c.JSON(401, gin.H{"error": err.Error()})
+			// Not: service.Login zaten Verified=false ise kabul etmiyor.
+			// Dışarıya nedeni yansıtma (invalid creds de).
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 			return
 		}
-		// cookie + JSON token
-		c.SetCookie("session", tok, 7*24*3600, "/", "", true, true)
-		c.JSON(200, gin.H{"ok": true, "token": tok, "token_type": "Bearer"})
+
+		// Güvenli cookie
+		http.SetCookie(c.Writer, &http.Cookie{
+			Name:     "session",
+			Value:    tok,
+			Path:     "/",
+			MaxAge:   7 * 24 * 3600,
+			HttpOnly: true,
+			Secure:   true,                   // sadece HTTPS
+			SameSite: http.SameSiteLaxMode,   // form login için ideal
+		})
+		// JSON cevabı (opsiyonel: token’ı döndürme)
+		c.JSON(http.StatusOK, gin.H{
+			"ok":         true,
+			// "token":   tok,          // gerekliyse aç
+			// "token_type": "Bearer",  // gerekliyse aç
+		})
 	})
 
 	r.POST("/api/auth/logout", func(c *gin.Context) {
-		c.SetCookie("session", "", -1, "/", "", true, true)
-		c.JSON(200, gin.H{"ok": true})
+    		http.SetCookie(c.Writer, &http.Cookie{
+    	    Name:     "session",
+ 	       Value:    "",
+       		 Path:     "/",
+      		  MaxAge:   -1,
+     		   HttpOnly: true,
+       			Secure:   true,
+       			 SameSite: http.SameSiteLaxMode,
+    		})
+    		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
+
+	// KOD DOĞRULAMA
+
+	r.POST("/api/auth/verify-code", func(c *gin.Context) {
+	    var req struct {
+	        Email string `json:"email"`
+        	Code  string `json:"code"`
+    	    }
+  	  if err := c.BindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "bad json"})
+        return
+  	  }
+ 	   if err := auth.VerifyCode(req.Email, req.Code); err != nil {
+        // istersen sabitle: "invalid or expired code"
+        	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+       		 return
+   		 }
+  		  c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	r.POST("/api/auth/resend-code", func(c *gin.Context) {
+    		var req struct{ Email string `json:"email"` }
+    		if err := c.BindJSON(&req); err != nil || req.Email == "" {
+    		    c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+    			return
+    		}
+  	  _ = auth.ResendCode(req.Email) // enumeration önleme
+ 	   c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+
+	r.GET("/api/auth/verify", func(c *gin.Context) { 
+    		t := c.Query("token")
+   		 if t == "" {
+        		c.JSON(400, gin.H{"error": "missing token"})
+        		return
+    		}
+    		if err := auth.VerifyEmail(t); err != nil {
+    		    c.JSON(400, gin.H{"error": err.Error()})
+       			 return
+   	 }
+    	// ✅ Doğrulama başarılı → kullanıcıyı ana sayfaya yönlendir
+   	 c.Redirect(http.StatusFound, "/")
+})
+
 
 	// --- Auth middleware (userID'yi context'e koyar) ---
 	authMW := func(c *gin.Context) {
