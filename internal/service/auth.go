@@ -1,14 +1,14 @@
 package service
 
 import (
-	"strings"
 	crand "crypto/rand"
+	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"os"
+	"strings"
 	"time"
-	"errors"
-	"log"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -17,22 +17,13 @@ import (
 	"example.com/ecom-go/internal/model"
 )
 
-// Not: ErrExistsVerified ve ErrExistsUnverified ayrı errors.go dosyasında varsa
-// buradakilerle ÇAKIŞMA olmasın. Eğer yoksa buradakileri kullan.
-//var (
-/*	ErrExistsVerified   = errors.New("exists-verified")
-	ErrExistsUnverified = errors.New("exists-unverified")
-)*/
-
 type AuthService interface {
 	Register(email, password string) error
 	VerifyCode(email, code string) error
 	ResendCode(email string) error
-	Login(email, password string) (string, error)  // returns JWT
-	ParseToken(token string) (uint, error)         // returns userID
-
-	// Eski link tabanlı doğrulama için (kullanmayacağız ama interface kırılmasın)
-	VerifyEmail(token string) error
+	Login(email, password string) (string, error) // returns JWT
+	ParseToken(token string) (uint, error)        // returns userID
+	VerifyEmail(token string) error               // legacy
 }
 
 type authService struct {
@@ -43,24 +34,9 @@ func NewAuthService(db *gorm.DB) AuthService { return &authService{db: db} }
 
 func jwtSecret() []byte { return []byte(os.Getenv("JWT_SECRET")) }
 
-// İhtiyaç halinde public base döndürür (şu an kod akışında kullanılmıyor)
-func publicBase() string {
-	if v := os.Getenv("APP_BASE_URL"); v != "" {
-		return v
-	}
-	if v := os.Getenv("PUBLIC_BASE_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:8080"
-}
-
-// ---------------------------------------------------
-// Yardımcılar
-// ---------------------------------------------------
-
-// 6 haneli doğrulama kodu (000000–999999), kriptografik rastgele
+// 6 haneli doğrulama kodu (000000–999999)
 func gen6() (string, error) {
-	max := big.NewInt(1000000) // 0..999999
+	max := big.NewInt(1000000)
 	n, err := crand.Int(crand.Reader, max)
 	if err != nil {
 		return "", err
@@ -79,14 +55,13 @@ func (a *authService) generateAndSendCode(u *model.User) error {
 	// DB'de kodu/süreyi güncelle
 	if err := a.db.Model(&model.User{}).
 		Where("id = ?", u.ID).
-		Updates(map[string]interface{}{
-			"verify_code":    code,
-			"verify_expires": expires,
+		Updates(map[string]any{
+			"verify_code":        code,
+			"verify_expires_at":  expires,
 		}).Error; err != nil {
 		return err
 	}
 
-	// Spam-dostu sade içerik
 	subject := "E-posta Doğrulama Kodun"
 	html := fmt.Sprintf(`
 <!doctype html>
@@ -97,7 +72,7 @@ func (a *authService) generateAndSendCode(u *model.User) error {
   <div style="font-size:28px;font-weight:700;letter-spacing:4px;margin:16px 0">%s</div>
   <p>Bu işlemi siz başlatmadıysanız, e-postayı yok sayabilirsiniz.</p>
   <hr>
-  <p style="color:#888;font-size:12px">Bu e-posta <a href="https://cakarokko.com">cakarokko.com</a> tarafından gönderildi.</p>
+  <p style="color:#888;font-size:12px">Bu e-posta cakarokko.com tarafından gönderildi.</p>
 </body></html>`, code)
 
 	if err := NewEmailService().Send(u.Email, subject, html); err != nil {
@@ -111,12 +86,14 @@ func (a *authService) generateAndSendCode(u *model.User) error {
 // ---------------------------------------------------
 func (a *authService) Register(email, password string) error {
 	var existed model.User
-	err := a.db.Where("email = ?", email).First(&existed).Error
+	err := a.db.
+		Select("id, email, verified").
+		Where("email = ?", email).
+		First(&existed).Error
 
 	if err == nil {
 		// kullanıcı var
 		if !existed.Verified {
-			// yeni kod üret ve gönder; hata loglanır, 200 döneriz
 			if err := a.generateAndSendCode(&existed); err != nil {
 				log.Printf("Kod maili gönderilemedi (yeniden): %v", err)
 			}
@@ -131,15 +108,15 @@ func (a *authService) Register(email, password string) error {
 	// yeni kullanıcı oluştur
 	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	u := model.User{
-		Email:    email,
-		Password: string(hash),
-		Verified: false,
+		Email:        email,
+		PasswordHash: string(hash), // <-- kritik
+		Verified:     false,
 	}
 	if err := a.db.Create(&u).Error; err != nil {
 		return err
 	}
 
-	// ilk doğrulama kodunu gönder (hata olursa logla ve yut)
+	// ilk doğrulama kodu
 	if err := a.generateAndSendCode(&u); err != nil {
 		log.Printf("Kod maili gönderilemedi: %v", err)
 	}
@@ -159,27 +136,25 @@ func (a *authService) VerifyCode(email, code string) error {
 	if u.Verified {
 		return nil // zaten doğrulanmış
 	}
-	if u.VerifyCode == "" || u.VerifyExpires == nil {
+	if u.VerifyCode == nil || u.VerifyExpiresAt == nil {
 		return errors.New("no active code")
 	}
-	if time.Now().After(*u.VerifyExpires) {
+	if time.Now().After(*u.VerifyExpiresAt) {
 		return errors.New("code expired")
 	}
-	if code != u.VerifyCode {
+	if code != *u.VerifyCode {
 		return errors.New("invalid code")
 	}
 
 	// doğrulandı → kodları temizle
-	if err := a.db.Model(&model.User{}).
+	return a.db.Model(&model.User{}).
 		Where("id = ?", u.ID).
 		Updates(map[string]any{
-			"verified":       true,
-			"verify_code":    nil,
-			"verify_expires": nil,
-		}).Error; err != nil {
-		return err
-	}
-	return nil
+			"verified":          true,
+			"verified_at":       gorm.Expr("COALESCE(verified_at, NOW())"),
+			"verify_code":       nil,
+			"verify_expires_at": nil,
+		}).Error
 }
 
 // ---------------------------------------------------
@@ -188,7 +163,7 @@ func (a *authService) VerifyCode(email, code string) error {
 func (a *authService) ResendCode(email string) error {
 	var u model.User
 	if err := a.db.Where("email = ?", email).First(&u).Error; err != nil {
-		// enumeration engelle: kullanıcı yoksa sessizce dön
+		// enumeration engelle: kullanıcı yoksa sessiz dön
 		return nil
 	}
 	if u.Verified {
@@ -198,7 +173,7 @@ func (a *authService) ResendCode(email string) error {
 }
 
 // ---------------------------------------------------
-// (Legacy) VerifyEmail by JWT — artık kullanılmıyor ama interface dursun
+// (Legacy) VerifyEmail by JWT — kullanılmıyor ama interface dursun
 // ---------------------------------------------------
 func (a *authService) VerifyEmail(token string) error {
 	claims := jwt.MapClaims{}
@@ -219,16 +194,48 @@ func (a *authService) VerifyEmail(token string) error {
 		Where("id = ?", uint(idFloat)).
 		Update("verified", true).Error
 }
+// ---------------------------------------------------
+// ResendVerification
+// ---------------------------------------------------
+func (s *AuthService) ResendVerification(ctx context.Context, email string) error {
+    // 6 haneli güvenli kod
+    n, _ := rand.Int(rand.Reader, big.NewInt(1000000))
+    code := fmt.Sprintf("%06d", n.Int64())
+    expires := time.Now().Add(15 * time.Minute)
 
+    // Sadece doğrulanmamış hesaplarda ayarla (Postgres)
+    // GORM ile '?' placeholder çalışır.
+    // Kullanıcı varsa günceller; yoksa RowsAffected=0 olur ama hata değildir.
+    tx := s.DB.WithContext(ctx).Exec(`
+        UPDATE users
+        SET verify_code = ?, verify_expires_at = ?
+        WHERE email = ? AND (verified IS DISTINCT FROM TRUE)
+    `, code, expires, email)
+
+    return tx.Error // hata yoksa nil
+}
 // ---------------------------------------------------
 // Login
 // ---------------------------------------------------
 func (a *authService) Login(email, password string) (string, error) {
 	var u model.User
-	if err := a.db.Where("email = ?", email).First(&u).Error; err != nil {
+	if err := a.db.
+		Select("id, email, verified, password_hash, password").
+		Where("email = ?", email).
+		First(&u).Error; err != nil {
 		return "", err
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password)); err != nil {
+
+	// Öncelik password_hash’te
+	pwdHash := u.PasswordHash
+	if pwdHash == "" {
+		pwdHash = u.Password // geriye uyumluluk
+	}
+	if pwdHash == "" {
+		return "", errors.New("invalid credentials")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(pwdHash), []byte(password)); err != nil {
 		return "", errors.New("invalid credentials")
 	}
 	if !u.Verified {

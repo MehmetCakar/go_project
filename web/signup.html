@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <title>Kayıt Ol</title>
+  <link rel="stylesheet" href="/assets/app.css?v=2">
+  <style>
+    .center {max-width:420px;margin:60px auto;background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:22px}
+    .title {font-size:28px;font-weight:700;margin:0 0 16px}
+    .row {margin-bottom:10px}
+    .row label{display:block;margin:0 0 6px;color:#9ca3af}
+    .row input{width:100%;height:42px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e5e7eb;padding:0 12px}
+    .btn{width:100%;height:42px;border-radius:10px;border:1px solid #334155;background:#111827;color:#e5e7eb;cursor:pointer}
+    .alt{margin-top:12px;text-align:center}
+    .msg{margin-top:10px;font-size:14px}
+  </style>
+</head>
+<body>
+  <div class="center">
+    <div class="title">Kayıt Ol</div>
+    <div class="row"><label>E-posta</label><input id="email" type="email" autocomplete="email"></div>
+    <div class="row"><label>Şifre</label><input id="p1" type="password" autocomplete="new-password"></div>
+    <div class="row"><label>Şifre (tekrar)</label><input id="p2" type="password" autocomplete="new-password"></div>
+    <button class="btn" onclick="go()">Kayıt Ol</button>
+    <div class="alt"><a href="/login.html">Zaten kaydım var</a></div>
+    <div id="m" class="msg"></div>
+  </div>
+<script>
+async function go(){
+  const email=document.getElementById('email').value.trim();
+  const p1=document.getElementById('p1').value, p2=document.getElementById('p2').value;
+  const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,password:p1,password2:p2})});
+  const j=await r.json();
+  if(!r.ok){document.getElementById('m').textContent=j.error||'Hata';return;}
+  localStorage.setItem('pendingEmail', email);
+  location.href='/verify.html';
+}
+</script>
+</body>
+</html>

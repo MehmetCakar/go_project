@@ -9,16 +9,21 @@ type Product struct {
   CreatedAt  time.Time
   UpdatedAt  time.Time
 }
+
+
 type User struct {
-	ID        uint      `gorm:"primaryKey"`
-	Email     string    `gorm:"uniqueIndex"`
-	Password  string
-	Verified  bool
-	// ---
-	VerifyCode    string     // 6 haneli kod (dilersen hash’leyebilirsin)
-	VerifyExpires *time.Time // son kullanma (örn. 15 dk)
-	// timestamps …
+	ID               uint       `gorm:"primaryKey"`
+	Email            string     `gorm:"uniqueIndex;not null"`
+	Password         string     `gorm:"column:password"`        // İstersen tutma ama map’li olsun
+	PasswordHash     string     `gorm:"column:password_hash"`   // BUNA bakacağız
+	Verified         bool       `gorm:"column:verified;not null;default:false"`
+	VerifiedAt       *time.Time `gorm:"column:verified_at"`
+	VerifyCode       *string    `gorm:"column:verify_code"`
+	VerifyExpiresAt  *time.Time `gorm:"column:verify_expires_at"`
 }
+
+func (User) TableName() string { return "users" }
+
 type CartItem struct {
 	ID        uint `gorm:"primaryKey"`
 	UserID    uint `gorm:"index"`

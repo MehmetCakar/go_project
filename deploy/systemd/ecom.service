@@ -1,0 +1,18 @@
+[Unit]
+Description=Ecom GO API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/go_project
+EnvironmentFile=-/root/go_project/.env
+Environment=GIN_MODE=release
+ExecStart=/usr/local/bin/ecom
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
