@@ -1,4 +1,4 @@
-// /web/assets/products.js
+// /assets/products.js
 
 async function api(p) {
   const r = await fetch(p, { credentials: "include" });
@@ -11,7 +11,10 @@ async function api(p) {
 
 const msg = (s, ok = true) => {
   const el = document.getElementById("msg");
-  if (el) { el.textContent = s; el.style.color = ok ? "#16a34a" : "#ef4444"; }
+  if (el) {
+    el.textContent = s;
+    el.style.color = ok ? "#16a34a" : "#ef4444";
+  }
 };
 
 function pick(v, ...alts) {
@@ -23,6 +26,7 @@ async function loadProducts() {
   try {
     const data = await api("/api/products");
     const list = document.getElementById("list");
+    if (!list) return;
     if (!Array.isArray(data)) throw new Error("Beklenmeyen yanıt");
 
     const hasExt = (s) => /\.(png|jpe?g|webp|gif|svg)$/i.test(s);
@@ -31,23 +35,18 @@ async function loadProducts() {
       const id    = pick(p.ID, p.id);
       const name  = pick(p.Name, p.name) || "Ürün";
 
-      // Görsel ham değeri al ve temizle
       let raw = pick(p.ImageURL, p.image_url, p.imageUrl, p.image, p.img);
       raw = (raw ?? "").toString().trim();
 
       let img;
       if (raw && /^https?:\/\//.test(raw)) {
-        // Tam URL ise (http/https)
         img = hasExt(raw) ? raw : "/assets/img/placeholder.png";
       } else if (raw && raw.startsWith("/assets/")) {
-        // /assets/... ise
         img = hasExt(raw) ? raw : "/assets/img/placeholder.png";
       } else if (raw) {
-        // Dosya adı veya görece yol geldiyse normalize et
         const fname = raw.replace(/^\/+/, "").replace(/^assets\/img\/?/, "");
-        img = hasExt(fname) ? `/assets/img/${fname}` : "/assets/img/placeholder.png";
+        img = hasExt(fname) ? /assets/img/${fname} : "/assets/img/placeholder.png";
       } else {
-        // Hiç görsel yoksa
         img = "/assets/img/placeholder.png";
       }
 
@@ -71,12 +70,7 @@ async function loadProducts() {
     msg("Ürünler yüklenemedi: " + e.message, false);
   }
 }
-async function(){
-  const r = await fetch('/api/me');
-  if (r.status === 401) { location.href = '/login.html'; return; }
-  // giriş varsa mevcut loadProducts()'ı çağır
-  if (typeof loadProducts === 'function') loadProducts();
-}();
+
 async function addToCart(id) {
   try {
     const r = await fetch("/api/cart/add", {
@@ -85,11 +79,12 @@ async function addToCart(id) {
       credentials: "include",
       body: JSON.stringify({ product_id: id, qty: 1 })
     });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw new Error(HTTP ${r.status});
     msg("Sepete eklendi");
   } catch (e) {
     msg("Giriş yapmanız gerekebilir: " + e.message, false);
   }
 }
 
+// Sayfa yüklenince ürünleri getir
 document.addEventListener("DOMContentLoaded", loadProducts);

@@ -1,136 +1,152 @@
 package handlers
 
 import (
-	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
-//	"github.com/gin-gonic/gin"
+
 	"example.com/ecom-go/internal/service"
+	"github.com/gin-gonic/gin"
 )
 
 type AuthHTTP struct {
-	S service.AuthService
+	svc          *service.AuthService
+	cookieDomain string
+	cookieSecure bool
 }
 
-type loginReq struct {
-    Email    string `json:"email" binding:"required"`
-    Password string `json:"password" binding:"required"`
+func NewAuthHTTP(svc *service.AuthService, domain string, secure bool) *AuthHTTP {
+	return &AuthHTTP{
+		svc:          svc,
+		cookieDomain: domain,
+		cookieSecure: secure,
+	}
 }
 
-
-func NewAuthHTTP(s service.AuthService) *AuthHTTP { return &AuthHTTP{S: s} }
-
-type jsonMap map[string]any
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+func (h *AuthHTTP) setCookie(c *gin.Context, token string, ttl time.Duration) {
+	c.SetCookie(
+		"access_token",
+		token,
+		int(ttl.Seconds()),
+		"/",
+		h.cookieDomain,
+		h.cookieSecure,
+		true,
+	)
 }
 
-func (h *AuthHTTP) Register(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHTTP) Register(c *gin.Context) {
 	var in struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
-		Password2 string `json:"password2"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSON(w, 400, jsonMap{"error":"Geçersiz JSON"}); return
+	if err := c.ShouldBindJSON(&in); err != nil || in.Email == "" || in.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email & password required"})
+		return
 	}
-	if in.Password != in.Password2 {
-		writeJSON(w, 400, jsonMap{"error":"Şifreler aynı değil"}); return
+
+	if len(in.Password) < 6 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password too short"})
+		return
 	}
-	if err := h.S.Register(in.Email, in.Password); err != nil {
-		// exists durumlarını kullanıcı dostu döndür
-		if err == service.ErrExistsUnverified {
-			writeJSON(w, 200, jsonMap{"ok": true, "info":"Doğrulama kodu tekrar gönderildi"}); return
+
+	if err := h.svc.Register(c, in.Email, in.Password); err != nil {
+		if errors.Is(err, service.ErrEmailInUse) {
+			c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+			return
 		}
-		if err == service.ErrExistsVerified {
-			writeJSON(w, 409, jsonMap{"error":"Bu e-posta zaten kayıtlı"}); return
-		}
-		writeJSON(w, 500, jsonMap{"error":"Kayıt başarısız"}); return
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-	writeJSON(w, 200, jsonMap{"ok": true})
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func (h *AuthHTTP) Verify(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHTTP) Verify(c *gin.Context) {
 	var in struct {
 		Email string `json:"email"`
 		Code  string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSON(w, 400, jsonMap{"error":"Geçersiz JSON"}); return
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email & code required"})
+		return
 	}
-	if err := h.S.VerifyCode(in.Email, in.Code); err != nil {
-		writeJSON(w, 400, jsonMap{"error": err.Error()}); return
+
+	if err := h.svc.Verify(c, in.Email, in.Code); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	writeJSON(w, 200, jsonMap{"ok": true})
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func (h *AuthHTTP) Login(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHTTP) Resend(c *gin.Context) {
+	var in struct {
+		Email string `json:"email"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil || in.Email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email required"})
+		return
+	}
+
+	if err := h.svc.Resend(c, in.Email); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *AuthHTTP) Login(c *gin.Context) {
 	var in struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSON(w, 400, jsonMap{"error":"Geçersiz JSON"}); return
+	if err := c.ShouldBindJSON(&in); err != nil || in.Email == "" || in.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email & password required"})
+		return
 	}
 
-	// 👉 AuthService.Login JWT üretir
-	token, err := h.S.Login(in.Email, in.Password)
+	_, err := h.svc.Login(c, in.Email, in.Password)
 	if err != nil {
-		writeJSON(w, 401, jsonMap{"error":"E-posta/şifre hatalı veya doğrulanmamış hesap"}); return
+		switch {
+		case errors.Is(err, service.ErrInvalidCredentials):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
+		case errors.Is(err, service.ErrNotVerified):
+			c.JSON(http.StatusConflict, gin.H{"error": "account not verified"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
 	}
 
-	// 👉 BURASI: JWT’yi HttpOnly cookie olarak yaz
-	http.SetCookie(w, &http.Cookie{
-		Name:     "auth",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   true, // HTTPS var (nginx ile)
-		Expires:  time.Now().Add(7 * 24 * time.Hour),
-	})
-
-	writeJSON(w, 200, jsonMap{"ok": true})
-}
-
-func (h *AuthHTTP) Logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     "auth",
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   true,
-		MaxAge:   -1, // sil
-	})
-	writeJSON(w, 200, jsonMap{"ok": true})
-}
-
-func (h *AuthHTTP) Me(w http.ResponseWriter, r *http.Request) {
-	c, err := r.Cookie("auth")
-	if err != nil || c.Value == "" {
-		writeJSON(w, 401, jsonMap{"error":"Giriş gerekli"}); return
+	tok, err := h.svc.IssueJWT(in.Email, 30*24*time.Hour)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "token issue failed"})
+		return
 	}
-	uid, err := h.S.ParseToken(c.Value)
-	if err != nil || uid == 0 {
-		writeJSON(w, 401, jsonMap{"error":"Giriş gerekli"}); return
-	}
-	// İstersen burada DB’den e-posta da çekip döndürebilirsin
-	writeJSON(w, 200, jsonMap{"id": uid})
 
-
+	h.setCookie(c, tok, 30*24*time.Hour)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
-func (h *AuthHTTP) Resend(w http.ResponseWriter, r *http.Request) {
-    var in struct{ Email string `json:"email"` }
-    if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
-        writeJSON(w, 400, jsonMap{"error": "Geçersiz JSON"}); return
-    }
-    // Kullanıcı yoksa bile service sessiz döner (enumeration engeli)
-    if err := h.S.ResendCode(in.Email); err != nil {
-        writeJSON(w, 500, jsonMap{"error": "Gönderilemedi"}); return
-    }
-    writeJSON(w, 200, jsonMap{"ok": true})
+
+func (h *AuthHTTP) Logout(c *gin.Context) {
+	h.setCookie(c, "", -1)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *AuthHTTP) Me(c *gin.Context) {
+	tok, err := c.Cookie("access_token")
+	if err != nil || tok == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "no auth"})
+		return
+	}
+
+	email, err := h.svc.ParseJWT(tok)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"email": email})
 }

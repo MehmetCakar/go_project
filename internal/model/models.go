@@ -1,55 +1,41 @@
 package model
+
 import "time"
 
-type Product struct {
-  ID         uint      `gorm:"primaryKey"`
-  Name       string
-  ImageURL   string
-  PriceCents int64
-  CreatedAt  time.Time
-  UpdatedAt  time.Time
-}
-
+// IMPORTANT: Uygulama kodu AutoMigrate/DDL ÇALIŞTIRMAZ.
+// Var olan şemaya uygun alanlar.
 
 type User struct {
-	ID               uint       `gorm:"primaryKey"`
-	Email            string     `gorm:"uniqueIndex;not null"`
-	Password         string     `gorm:"column:password"`        // İstersen tutma ama map’li olsun
-	PasswordHash     string     `gorm:"column:password_hash"`   // BUNA bakacağız
-	Verified         bool       `gorm:"column:verified;not null;default:false"`
-	VerifiedAt       *time.Time `gorm:"column:verified_at"`
-	VerifyCode       *string    `gorm:"column:verify_code"`
-	VerifyExpiresAt  *time.Time `gorm:"column:verify_expires_at"`
+	ID            uint       `gorm:"primaryKey"`
+	Email         string     `gorm:"column:email"`
+	PasswordHash  string     `gorm:"not null"`
+	Verified      bool       `gorm:"column:verified"`
+	VerifyCode    string     `gorm:"column:verify_code"`
+	VerifyExpires *time.Time `gorm:"column:verify_expires"`
+	CreatedAt     *time.Time `gorm:"column:created_at"`
+	UpdatedAt     *time.Time `gorm:"column:updated_at"`
 }
 
 func (User) TableName() string { return "users" }
 
-type CartItem struct {
-	ID        uint `gorm:"primaryKey"`
-	UserID    uint `gorm:"index"`
-	ProductID uint
-	Qty       int
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Product   Product
+type Product struct {
+	ID         uint       `gorm:"primaryKey"`
+	Name       string     `gorm:"column:name"`
+	ImageURL   string     `gorm:"column:image_url"`
+	PriceCents int64      `gorm:"column:price_cents"`
+	CreatedAt  *time.Time `gorm:"column:created_at"`
+	UpdatedAt  *time.Time `gorm:"column:updated_at"`
 }
+
+func (Product) TableName() string { return "products" }
 
 type Order struct {
-	ID         uint `gorm:"primaryKey"`
-	UserID     uint `gorm:"index"`
-	TotalCents int64
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	Items      []OrderItem
+	ID         uint       `gorm:"primaryKey"`
+	UserID     uint       `gorm:"column:user_id"`
+	Status     string     `gorm:"column:status"`
+	TotalCents int64      `gorm:"column:total_cents"`
+	CreatedAt  *time.Time `gorm:"column:created_at"`
+	UpdatedAt  *time.Time `gorm:"column:updated_at"`
 }
 
-type OrderItem struct {
-	ID         uint `gorm:"primaryKey"`
-	OrderID    uint `gorm:"index"`
-	ProductID  uint
-	Name       string
-	PriceCents int64
-	Qty        int
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-}
+func (Order) TableName() string { return "orders" }

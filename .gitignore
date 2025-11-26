@@ -1,22 +1,18 @@
-# Go
-bin/
-dist/
+# Go build artifacts
+ecom
 *.exe
 *.out
 
-# Env / Secrets
+# Environment / secrets
 .env
-*.env
-*.pem
-*.key
+.env.*
+/config.local.yaml
 
-# Editor/OS
+# IDE / editor
 .vscode/
 .idea/
+*.swp
+
+# OS
 .DS_Store
-
-# Logs
-*.log
-
-# Build artifact
-ecom
+Thumbs.db

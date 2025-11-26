@@ -1,272 +1,219 @@
 package service
 
 import (
-	crand "crypto/rand"
+	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
-	"log"
-	"math/big"
-	"os"
-	"strings"
-	"time"
-	"context"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+	"strings"
+	"time"
 
 	"example.com/ecom-go/internal/model"
 )
 
-type AuthService interface {
-    Register(email, password string) error
-    VerifyCode(email, code string) error
-    ResendCode(email string) error
-    VerifyEmail(token string) error
-    ResendVerification(ctx context.Context, email string) error
-    Login(email, password string) (string, error)
-    ParseToken(token string) (uint, error)
+var (
+	//    ErrInvalidCredentials = errors.New("invalid email or password")
+	ErrNotVerified = errors.New("email not verified")
+)
+
+type AuthService struct {
+	db        *gorm.DB
+	jwtSecret []byte
+	mailer    EmailSender
+	codeTTL   time.Duration
 }
-type authService struct {
-	db *gorm.DB
+
+func NewAuthService(db *gorm.DB, jwtSecret []byte, mailer EmailSender, codeTTL time.Duration) *AuthService {
+	return &AuthService{db: db, jwtSecret: jwtSecret, mailer: mailer, codeTTL: codeTTL}
 }
 
-func NewAuthService(db *gorm.DB) AuthService { return &authService{db: db} }
-
-func jwtSecret() []byte { return []byte(os.Getenv("JWT_SECRET")) }
-
-// 6 haneli doğrulama kodu (000000–999999)
-func gen6() (string, error) {
-	max := big.NewInt(1000000)
-	n, err := crand.Int(crand.Reader, max)
-	if err != nil {
+func randomCode() (string, error) {
+	var b [3]byte
+	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%06d", n.Int64()), nil
+	n := int(b[0])<<16 | int(b[1])<<8 | int(b[2])
+	code := 100000 + (n % 900000)
+	return fmt.Sprintf("%06d", code), nil
 }
 
-// Kullanıcıya yeni kod üretir, DB'ye yazar ve e-posta gönderir.
-func (a *authService) generateAndSendCode(u *model.User) error {
-	code, err := gen6()
+func (a *AuthService) Register(ctx context.Context, email, password string) error {
+	email = strings.TrimSpace(strings.ToLower(email))
+	password = strings.TrimSpace(password)
+
+	if email == "" || password == "" {
+		return errors.New("email and password required")
+	}
+
+	var u model.User
+	err := a.db.WithContext(ctx).Where("email = ?", email).First(&u).Error
+
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// yeni kullanc
+		u = model.User{Email: email, Verified: false}
+	case err != nil:
+		return err
+	default:
+		// kullanc bulundu
+		if u.Verified {
+			return ErrEmailInUse
+		}
+		// verified=false ise devam edip kodu ve ifreyi gncelleyeceiz
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
-	expires := time.Now().Add(15 * time.Minute)
 
-	// DB'de kodu/süreyi güncelle
-	if err := a.db.Model(&model.User{}).
-		Where("id = ?", u.ID).
+	code, err := randomCode()
+	if err != nil {
+		return err
+	}
+	exp := time.Now().Add(a.codeTTL)
+
+	u.PasswordHash = string(hash)
+	u.VerifyCode = code
+	u.VerifyExpires = &exp
+	u.Verified = false
+
+	if u.ID == 0 {
+		if err := a.db.WithContext(ctx).Create(&u).Error; err != nil {
+			return err
+		}
+	} else {
+		if err := a.db.WithContext(ctx).Model(&u).Updates(map[string]any{
+			"password_hash":  u.PasswordHash,
+			"verify_code":    u.VerifyCode,
+			"verify_expires": u.VerifyExpires,
+			"verified":       false,
+		}).Error; err != nil {
+			return err
+		}
+	}
+
+	if a.mailer != nil {
+		body := fmt.Sprintf("<p>Dorulama kodunuz: <b>%s</b></p>", code)
+		if err := a.mailer.Send(email, "Dorulama Kodunuz", body); err != nil {
+			return fmt.Errorf("send mail: %w", err)
+		}
+	}
+	return nil
+}
+func (s *AuthService) HashPassword(plain string) (string, error) {
+	b, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+	return string(b), err
+}
+func (s *AuthService) Login(ctx context.Context, email, password string) (*model.User, error) {
+	var u model.User
+	if err := s.db.WithContext(ctx).
+		Where("email = ?", strings.ToLower(strings.TrimSpace(email))).
+		First(&u).Error; err != nil {
+		return nil, ErrInvalidCredentials
+	}
+
+	// ifre dorulama
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+		return nil, ErrInvalidCredentials
+	}
+
+	// Dorulanmam kullancya izin vermek istemiyorsanz:
+	if !u.Verified {
+		return nil, ErrNotVerified
+	}
+
+	return &u, nil
+}
+
+func (a *AuthService) Resend(ctx context.Context, email string) error {
+	var u model.User
+	if err := a.db.WithContext(ctx).Where("email = ?", email).First(&u).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("user not found")
+		}
+		return err
+	}
+	if u.Verified {
+		return ErrEmailInUse
+	}
+
+	code, err := randomCode()
+	if err != nil {
+		return err
+	}
+	exp := time.Now().Add(a.codeTTL)
+
+	if err := a.db.WithContext(ctx).
+		Model(&u).
 		Updates(map[string]any{
-			"verify_code":        code,
-			"verify_expires_at":  expires,
+			"verify_code":    code,
+			"verify_expires": &exp,
 		}).Error; err != nil {
 		return err
 	}
 
-	subject := "E-posta Doğrulama Kodun"
-	html := fmt.Sprintf(`
-<!doctype html>
-<html><body style="font-family:Arial,sans-serif">
-  <h2>Doğrulama Kodun</h2>
-  <p>Merhaba,</p>
-  <p>Aşağıdaki 6 haneli kodu 15 dakika içinde sitedeki doğrulama kutusuna gir:</p>
-  <div style="font-size:28px;font-weight:700;letter-spacing:4px;margin:16px 0">%s</div>
-  <p>Bu işlemi siz başlatmadıysanız, e-postayı yok sayabilirsiniz.</p>
-  <hr>
-  <p style="color:#888;font-size:12px">Bu e-posta cakarokko.com tarafından gönderildi.</p>
-</body></html>`, code)
-
-	if err := NewEmailService().Send(u.Email, subject, html); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ---------------------------------------------------
-// Register
-// ---------------------------------------------------
-func (a *authService) Register(email, password string) error {
-	var existed model.User
-	err := a.db.
-		Select("id, email, verified").
-		Where("email = ?", email).
-		First(&existed).Error
-
-	if err == nil {
-		// kullanıcı var
-		if !existed.Verified {
-			if err := a.generateAndSendCode(&existed); err != nil {
-				log.Printf("Kod maili gönderilemedi (yeniden): %v", err)
-			}
-			return ErrExistsUnverified
+	if a.mailer != nil {
+		body := fmt.Sprintf("<p>Dorulama kodunuz: <b>%s</b></p>", code)
+		if err := a.mailer.Send(email, "Dorulama Kodunuz", body); err != nil {
+			return fmt.Errorf("send mail: %w", err)
 		}
-		return ErrExistsVerified
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-
-	// yeni kullanıcı oluştur
-	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	u := model.User{
-		Email:        email,
-		PasswordHash: string(hash), // <-- kritik
-		Verified:     false,
-	}
-	if err := a.db.Create(&u).Error; err != nil {
-		return err
-	}
-
-	// ilk doğrulama kodu
-	if err := a.generateAndSendCode(&u); err != nil {
-		log.Printf("Kod maili gönderilemedi: %v", err)
 	}
 	return nil
 }
 
-// ---------------------------------------------------
-// VerifyCode
-// ---------------------------------------------------
-func (a *authService) VerifyCode(email, code string) error {
-	code = strings.TrimSpace(code)
-
+func (a *AuthService) Verify(ctx context.Context, email, code string) error {
 	var u model.User
-	if err := a.db.Where("email = ?", email).First(&u).Error; err != nil {
+	if err := a.db.WithContext(ctx).Where("email = ?", email).First(&u).Error; err != nil {
 		return err
 	}
-	if u.Verified {
-		return nil // zaten doğrulanmış
+	if u.VerifyCode == "" || u.VerifyCode != code {
+		return fmt.Errorf("invalid code")
 	}
-	if u.VerifyCode == nil || u.VerifyExpiresAt == nil {
-		return errors.New("no active code")
+	if u.VerifyExpires != nil && time.Now().After(*u.VerifyExpires) {
+		return fmt.Errorf("code expired")
 	}
-	if time.Now().After(*u.VerifyExpiresAt) {
-		return errors.New("code expired")
-	}
-	if code != *u.VerifyCode {
-		return errors.New("invalid code")
-	}
-
-	// doğrulandı → kodları temizle
-	return a.db.Model(&model.User{}).
-		Where("id = ?", u.ID).
-		Updates(map[string]any{
-			"verified":          true,
-			"verified_at":       gorm.Expr("COALESCE(verified_at, NOW())"),
-			"verify_code":       nil,
-			"verify_expires_at": nil,
-		}).Error
+	return a.db.WithContext(ctx).Model(&u).Updates(map[string]any{
+		"verified":       true,
+		"verify_code":    "",
+		"verify_expires": nil,
+	}).Error
 }
 
-// ---------------------------------------------------
-// ResendCode
-// ---------------------------------------------------
-func (a *authService) ResendCode(email string) error {
-	var u model.User
-	if err := a.db.Where("email = ?", email).First(&u).Error; err != nil {
-		// enumeration engelle: kullanıcı yoksa sessiz dön
-		return nil
+func (a *AuthService) IssueJWT(email string, ttl time.Duration) (string, error) {
+	claims := jwt.MapClaims{
+		"sub": email,
+		"exp": time.Now().Add(ttl).Unix(),
+		"iat": time.Now().Unix(),
 	}
-	if u.Verified {
-		return nil
-	}
-	return a.generateAndSendCode(&u)
+	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return t.SignedString(a.jwtSecret)
 }
 
-// ---------------------------------------------------
-// (Legacy) VerifyEmail by JWT — kullanılmıyor ama interface dursun
-// ---------------------------------------------------
-func (a *authService) VerifyEmail(token string) error {
-	claims := jwt.MapClaims{}
-	_, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
-		return jwtSecret(), nil
+func (a *AuthService) ParseJWT(token string) (string, error) {
+	parsed, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("bad alg")
+		}
+		return a.jwtSecret, nil
 	})
-	if err != nil {
-		return err
+	if err != nil || !parsed.Valid {
+		return "", fmt.Errorf("invalid token")
 	}
-	if claims["typ"] != "verify" {
-		return errors.New("invalid token type")
+	if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
+		if sub, ok := claims["sub"].(string); ok {
+			return sub, nil
+		}
 	}
-	idFloat, ok := claims["sub"].(float64)
-	if !ok {
-		return errors.New("invalid sub")
-	}
-	return a.db.Model(&model.User{}).
-		Where("id = ?", uint(idFloat)).
-		Update("verified", true).Error
-}
-// ---------------------------------------------------
-// ResendVerification
-// ---------------------------------------------------
-func (a *authService) ResendVerification(ctx context.Context, email string) error {
-    // 6 haneli güvenli kod
-    n, _ := crand.Int(crand.Reader, big.NewInt(1000000))
-    code := fmt.Sprintf("%06d", n.Int64())
-    expires := time.Now().Add(15 * time.Minute)
-
-    // Sadece doğrulanmamış hesaplarda ayarla (Postgres)
-    // GORM ile '?' placeholder çalışır.
-    // Kullanıcı varsa günceller; yoksa RowsAffected=0 olur ama hata değildir.
-    tx := a.db.WithContext(ctx).Exec(`
-        UPDATE users
-        SET verify_code = ?, verify_expires_at = ?
-        WHERE email = ? AND (verified IS DISTINCT FROM TRUE)
-    `, code, expires, email)
-
-    return tx.Error // hata yoksa nil
-}
-// ---------------------------------------------------
-// Login
-// ---------------------------------------------------
-func (a *authService) Login(email, password string) (string, error) {
-	var u model.User
-	if err := a.db.
-		Select("id, email, verified, password_hash, password").
-		Where("email = ?", email).
-		First(&u).Error; err != nil {
-		return "", err
-	}
-
-	// Öncelik password_hash’te
-	pwdHash := u.PasswordHash
-	if pwdHash == "" {
-		pwdHash = u.Password // geriye uyumluluk
-	}
-	if pwdHash == "" {
-		return "", errors.New("invalid credentials")
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(pwdHash), []byte(password)); err != nil {
-		return "", errors.New("invalid credentials")
-	}
-	if !u.Verified {
-		return "", errors.New("email not verified")
-	}
-
-	t := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub": u.ID,
-		"typ": "session",
-		"exp": time.Now().Add(7 * 24 * time.Hour).Unix(),
-	})
-	return t.SignedString(jwtSecret())
+	return "", fmt.Errorf("bad claims")
 }
 
-// ---------------------------------------------------
-// ParseToken
-// ---------------------------------------------------
-func (a *authService) ParseToken(token string) (uint, error) {
-	claims := jwt.MapClaims{}
-	_, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
-		return jwtSecret(), nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	if claims["typ"] != "session" {
-		return 0, errors.New("invalid token type")
-	}
-	idFloat, ok := claims["sub"].(float64)
-	if !ok {
-		return 0, errors.New("invalid sub")
-	}
-	return uint(idFloat), nil
+func (a *AuthService) RandomPassword() string {
+	buf := make([]byte, 18)
+	_, _ = rand.Read(buf)
+	return base64.RawURLEncoding.EncodeToString(buf)
 }
