@@ -1,0 +1,41 @@
+package migrate
+
+import (
+	"fmt"
+
+	"gorm.io/gorm"
+	"example.com/ecom-go/internal/model"
+)
+
+const addUniUsersEmail = `
+DO $$
+BEGIN
+  IF to_regclass('public.users') IS NOT NULL THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint WHERE conname = 'uni_users_email'
+    ) THEN
+      ALTER TABLE public.users
+        ADD CONSTRAINT uni_users_email UNIQUE (email);
+    END IF;
+  END IF;
+END$$;`
+
+func Run(db *gorm.DB) error {
+	// 0) Compat: GORM AutoMigrate sırasında "DROP CONSTRAINT uni_users_email" deneyebilir.
+	//    Varsa sorun yok; yoksa önce biz ekleyelim ki DROP 42704 ile patlamasın.
+	if err := db.Exec(addUniUsersEmail).Error; err != nil {
+		return fmt.Errorf("pre add unique email: %w", err)
+	}
+
+	// 1) Şemayı migrate et
+	if err := db.AutoMigrate(&model.User{}); err != nil {
+		return fmt.Errorf("automigrate user: %w", err)
+	}
+
+	// 2) Son durumda da UNIQUE(email) garanti olsun (idempotent)
+	if err := db.Exec(addUniUsersEmail).Error; err != nil {
+		return fmt.Errorf("post add unique email: %w", err)
+	}
+
+	return nil
+}

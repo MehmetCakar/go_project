@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
-	"github.com/gin-gonic/gin"
+//	"github.com/gin-gonic/gin"
 	"example.com/ecom-go/internal/service"
 )
 
@@ -65,18 +65,6 @@ func (h *AuthHTTP) Verify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, jsonMap{"error": err.Error()}); return
 	}
 	writeJSON(w, 200, jsonMap{"ok": true})
-}
-func (h *Auth) Resend(c *gin.Context) {
-    var req struct {
-        Email string `json:"email" binding:"required,email"`
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz istek"})
-        return
-    }
-    // E-posta var/yok, doğrulanmış/ değil — ayrıntı sızdırmamak için her durumda 200 döneceğiz.
-    _ = h.Svc.ResendVerification(c.Request.Context(), req.Email)
-    c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (h *AuthHTTP) Login(w http.ResponseWriter, r *http.Request) {

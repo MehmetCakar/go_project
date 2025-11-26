@@ -22,13 +22,6 @@ func NewServer(cfg Config) (*gin.Engine, func(), error) {
 	}
 
 	// --- Migrations (burayı genişlettik) ---
-	if err := db.AutoMigrate(
-		&model.Product{},
-		&model.User{},
-		&model.CartItem{},
-		&model.Order{},
-		&model.OrderItem{},
-	); err != nil {
 		return nil, nil, err
 	}
 

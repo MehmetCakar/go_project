@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 	"time"
-
+	"context"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -18,14 +18,14 @@ import (
 )
 
 type AuthService interface {
-	Register(email, password string) error
-	VerifyCode(email, code string) error
-	ResendCode(email string) error
-	Login(email, password string) (string, error) // returns JWT
-	ParseToken(token string) (uint, error)        // returns userID
-	VerifyEmail(token string) error               // legacy
+    Register(email, password string) error
+    VerifyCode(email, code string) error
+    ResendCode(email string) error
+    VerifyEmail(token string) error
+    ResendVerification(ctx context.Context, email string) error
+    Login(email, password string) (string, error)
+    ParseToken(token string) (uint, error)
 }
-
 type authService struct {
 	db *gorm.DB
 }
@@ -197,16 +197,16 @@ func (a *authService) VerifyEmail(token string) error {
 // ---------------------------------------------------
 // ResendVerification
 // ---------------------------------------------------
-func (s *AuthService) ResendVerification(ctx context.Context, email string) error {
+func (a *authService) ResendVerification(ctx context.Context, email string) error {
     // 6 haneli güvenli kod
-    n, _ := rand.Int(rand.Reader, big.NewInt(1000000))
+    n, _ := crand.Int(crand.Reader, big.NewInt(1000000))
     code := fmt.Sprintf("%06d", n.Int64())
     expires := time.Now().Add(15 * time.Minute)
 
     // Sadece doğrulanmamış hesaplarda ayarla (Postgres)
     // GORM ile '?' placeholder çalışır.
     // Kullanıcı varsa günceller; yoksa RowsAffected=0 olur ama hata değildir.
-    tx := s.DB.WithContext(ctx).Exec(`
+    tx := a.db.WithContext(ctx).Exec(`
         UPDATE users
         SET verify_code = ?, verify_expires_at = ?
         WHERE email = ? AND (verified IS DISTINCT FROM TRUE)
